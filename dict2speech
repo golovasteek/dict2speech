@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+import sys
+import os
+from urllib import request
+from urllib import parse
+import json
+import subprocess
+import argparse
+import shutil
+from pydub import AudioSegment
+
+transKey = "trnsl.1.1.20131109T102450Z.2d6822b2f51e89f1.56bbf6b760af174711281ff08b10a7832b175499"
+transUrlTemplate = "https://translate.yandex.net/api/v1.5/tr.json/translate?{params}"
+kinds = ('define', 'test', 'reverce')
+
+germanVoice = 'Julia'
+russianVoice = 'Alyona'
+
+class Dictionary:
+    def __init__(self, fileName=None):
+        self._data = []
+        if fileName:
+            with open(fileName) as dictFile:
+                for line in dictFile:
+                    if line[0] == '#' or not line.strip():
+                        continue
+                    try:
+                        [text, translation] = line.split('\t')
+                        self.insert(text, translation)
+                    except:
+                        print('Wrong line {line}'.format(line = line))
+    
+    def insert(self, text, translation):
+        assert(isinstance(text, str))
+        assert(isinstance(translation, str))
+        print('added: {text}\t{translation}'.format(text = text, translation = translation))
+        self._data += [(text, translation)]
+
+    def save(self, fileName):
+        with open(fileName, 'w') as dictFile:
+            for text, translation in self._data:
+                dictFile.write('{text}\t{translation}\n'.format(text = text, translation = translation))
+
+    def pairs(self):
+        return self._data
+
+def say(lang, text, fileName):
+    voices = {'de': 'Julia', 'ru': 'Alyona'}
+    audioDevice = 'Soundflower (2ch)'
+    sayArgs = ('say', '-v', voices[lang], '-a', audioDevice, '"' + text + '"')
+    recEnv = os.environ.copy()
+    recEnv['AUDIODEV'] = audioDevice
+    recArgs = ('rec', fileName, 'silence', '1', '0.1', '0', '1', '0.5', '0.1%')
+    
+    recProcess = subprocess.Popen(recArgs, env = recEnv)
+    subprocess.Popen(sayArgs).wait()
+    recProcess.wait()
+
+
+def generateSound(text, translation, soundDir, num):
+    print(text, translation, num)
+    say('de', text, 'text.wav')
+    say('ru', translation, 'translation.wav')
+
+    textSound = AudioSegment.from_file('text.wav')
+    transSound = AudioSegment.from_file('translation.wav')
+    gapSound = textSound.fade(from_gain=-100,to_gain=-100, start = 0, end=len(textSound))
+    longGap = gapSound * 3
+    defineSound = textSound + gapSound + transSound + longGap
+    testSound = textSound + gapSound * 2 + transSound + longGap
+    reverceSound = transSound + gapSound * 2 + textSound + longGap
+    defineSound.export(os.path.join(soundDir, 'define', str(num)+'.mp3'))
+    testSound.export(os.path.join(soundDir, 'test', str(num)+'.mp3'))
+    reverceSound.export(os.path.join(soundDir, 'reverce', str(num)+'.mp3'))
+
+def cleanDir(dirName):
+    for root, dirs, files in os.walk(dirName):
+        for f in files:
+            os.unlink(os.path.join(root, f))
+        for d in dirs:
+            shutil.rmtree(os.path.join(root, d))
+
+def dictFile(dictName):
+    return os.path.join(dictName, dictName + ".dict")
+
+def soundDir(dictName):
+    return dictFile(dictName) + '.sound'
+
+def createDirs(dictName):
+    if not os.path.exists(dictName):
+        os.makedirs(dictName)
+    if not os.path.exists(soundDir(dictName)):
+        os.makedirs(soundDir(dictName))
+    cleanDir(soundDir(dictName))
+    for kind in kinds:
+        os.makedirs(os.path.join(soundDir(dictName), kind))
+
+
+    
+
+parser = argparse.ArgumentParser(description = 'Dictionary to sound compiler')
+parser.add_argument('-d', action='store', dest='dictName', help='Name for dictionary tobe saved')
+
+args = parser.parse_args()
+
+if os.path.exists(dictFile(args.dictName)):
+    dic = Dictionary(dictFile(args.dictName))
+else:
+    dic = Dictionary()
+
+createDirs(args.dictName)
+
+for line in sys.stdin:
+    text = line.strip()
+    params = parse.urlencode({"key" : transKey, "lang" : "de-ru", "text" : text})
+    req = request.Request(transUrlTemplate.format(params = params))
+    jsonResponse = json.loads(request.urlopen(req).read().decode())
+    if jsonResponse['code'] == 200:
+        translation = jsonResponse['text'][0].strip();
+        ans = input('translation: {trans} [Y/n]: '.format(trans = translation)).lower()
+        if ans == 'n':
+            translation = None
+        if ans == 'c':
+            continue
+
+    if translation is None:
+        translation = input('Enter translation: ')
+
+    dic.insert(text, translation)
+
+
+dic.save(dictFile(args.dictName))
+
+
+i = 0
+for text, translation in dic.pairs():
+    generateSound(text, translation, soundDir(args.dictName), i)
+    i += 1
+
+for kind in kinds:
+    compiledSound = None
+    for root, dirs, files in os.walk(os.path.join(soundDir(args.dictName), kind)):
+        for f in files:
+            seq = AudioSegment.from_mp3(os.path.join(root,f))
+            if compiledSound:
+                compiledSound = compiledSound + seq
+            else:
+                compiledSound = seq
+
+    compiledSound.export(dictFile(args.dictName) + '.' + kind +  '.' + 'mp3')
+
+cleanDir(soundDir(args.dictName))
